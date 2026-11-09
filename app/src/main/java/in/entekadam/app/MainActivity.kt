@@ -1,138 +1,10 @@
-package `in`.entekadam.app
-
-import android.app.DatePickerDialog
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.*
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.*
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.*
-import androidx.room.withTransaction
-import `in`.entekadam.app.data.*
-import `in`.entekadam.app.util.*
-import kotlinx.coroutines.launch
-import java.util.Calendar
-import java.util.Locale
-
-private val Green = Color(0xFF168653)
-private val Pale = Color(0xFFEAF6EF)
-
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 410)
-        }
-        setContent { EnteKadamRoot() }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable fun EnteKadamRoot() {
-    val context = LocalContext.current
-    val db = remember { AppDatabase.get(context) }
-    val dao = db.dao()
-    val people by dao.people().collectAsState(initial = emptyList())
-    val debts by dao.debts().collectAsState(initial = emptyList())
-    val payments by dao.payments().collectAsState(initial = emptyList())
-    val audit by dao.auditLog().collectAsState(initial = emptyList())
-    val prefs = remember { context.getSharedPreferences("settings", 0) }
-    var language by remember { mutableStateOf(prefs.getString("language", "ml") ?: "ml") }
-    var dark by remember { mutableStateOf(prefs.getBoolean("dark", false)) }
-    var tab by remember { mutableStateOf(0) }
-    var selectedPerson by remember { mutableStateOf<Person?>(null) }
-    var showAdd by remember { mutableStateOf(false) }
-    var addSide by remember { mutableStateOf("RECEIVE") }
-    var addFor by remember { mutableStateOf<Person?>(null) }
-    var payDebt by remember { mutableStateOf<Debt?>(null) }
-    var payOverLimit by remember { mutableStateOf(false) }; var pendingPayment by remember { mutableStateOf<Payment?>(null) }
-    var search by remember { mutableStateOf("") }
-    var statementText by remember { mutableStateOf("") }
-    var showStatement by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val ml = language == "ml"
-    fun tr(en: String, mal: String) = if (ml) mal else en
-    val totals = remember(people, debts, payments) {
-        val pMap = people.associateBy { it.id }
-        val receivedDebts = debts.filter { pMap[it.personId]?.side == "RECEIVE" }
-        val paidDebts = debts.filter { pMap[it.personId]?.side == "PAY" }
-        val paidByDebt = payments.groupBy { it.debtId }.mapValues { (_, list) -> list.sumOf { it.amountPaise } }
-        val got = payments.filter { payment -> debts.firstOrNull { it.id == payment.debtId }?.let { pMap[it.personId]?.side == "RECEIVE" } == true }.sumOf { it.amountPaise }
-        val gave = payments.filter { payment -> debts.firstOrNull { it.id == payment.debtId }?.let { pMap[it.personId]?.side == "PAY" } == true }.sumOf { it.amountPaise }
-        val receivable = receivedDebts.sumOf { (it.amountPaise - (paidByDebt[it.id] ?: 0)).coerceAtLeast(0) }
-        val payable = paidDebts.sumOf { (it.amountPaise - (paidByDebt[it.id] ?: 0)).coerceAtLeast(0) }
-        listOf(receivable, payable, got, gave, receivedDebts.sumOf { it.amountPaise }, paidDebts.sumOf { it.amountPaise })
-    }
-    MaterialTheme(colorScheme = if (dark) darkColorScheme(primary = Color(0xFF5BD49A), secondary = Green) else lightColorScheme(primary = Green, secondary = Color(0xFF438D68), background = Color(0xFFF5FAF6))) {
-        Scaffold(containerColor = MaterialTheme.colorScheme.background, topBar = {
-            TopAppBar(title = { Column { Text("എൻ്റെ കടം", fontWeight = FontWeight.Bold); Text("Ente Kadam", style = MaterialTheme.typography.labelSmall) } }, actions = {
-                IconButton(onClick = { tab = 1 }) { Icon(Icons.Default.Search, "Search") }
-            })
-        }, bottomBar = {
-            NavigationBar {
-                val labels = listOf(tr("Home", "ഹോം"), tr("People", "ആളുകൾ"), tr("Transactions", "ഇടപാടുകൾ"), tr("Reports", "റിപ്പോർട്ടുകൾ"), tr("Settings", "ക്രമീകരണം"))
-                val icons = listOf(Icons.Default.Home, Icons.Default.People, Icons.Default.ReceiptLong, Icons.Default.BarChart, Icons.Default.Settings)
-                labels.forEachIndexed { i, label -> NavigationBarItem(selected = tab == i, onClick = { tab = i; selectedPerson = null }, icon = { Icon(icons[i], null) }, label = { Text(label, fontSize = 10.sp) }) }
-            }
-        }) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding)) {
-                if (selectedPerson != null) {
-                    PersonDetails(selectedPerson!!, debts.filter { it.personId == selectedPerson!!.id }, payments, dao, language, onBack = { selectedPerson = null }, onAddDebt = { addFor = selectedPerson; addSide = selectedPerson!!.side; showAdd = true }, onPay = { payDebt = it }, onShare = {
-                        val p = selectedPerson!!; val pd = debts.filter { it.personId == p.id }; val sum = pd.sumOf { it.amountPaise }; val repaid = payments.filter { payment -> pd.any { it.id == payment.debtId } }.sumOf { it.amountPaise }; val last = payments.filter { payment -> pd.any { it.id == payment.debtId } }.maxByOrNull { it.date }?.date
-                        statementText = if (ml) "നമസ്കാരം ${p.name},\n\nനിങ്ങളുടെ കടത്തിന്റെ കണക്ക്:\n\nആകെ കടം: ${money(sum)}\nതിരിച്ചടച്ചത്: ${money(repaid)}\nബാക്കി തുക: ${money((sum-repaid).coerceAtLeast(0))}\n\nഅവസാനമായി പണം ലഭിച്ചത്: ${dateText(last)}\n\nനന്ദി." else "Hello ${p.name},\n\nHere is your account statement:\n\nTotal Amount: ${money(sum)}\nAmount Repaid: ${money(repaid)}\nRemaining Balance: ${money((sum-repaid).coerceAtLeast(0))}\n\nLast Payment Date: ${dateText(last)}\n\nThank you."
-                        showStatement = true
-                    }, tr = ::tr)
-                } else when (tab) {
-                    0 -> HomeScreen(totals, people, debts, payments, search, { search = it }, tr, onAdd = { side -> addSide = side; addFor = null; showAdd = true }, onPerson = { selectedPerson = it }, onPay = { payDebt = it })
-                    1 -> PeopleScreen(people, debts, payments, search, { search = it }, tr, onAdd = { side -> addSide = side; addFor = null; showAdd = true }, onPerson = { selectedPerson = it })
-                    2 -> TransactionsScreen(people, debts, payments, search, { search = it }, tr)
-                    3 -> ReportsScreen(totals, people, debts, payments, tr, onPdf = {
-                        val lines = buildList { add("Generated: ${dateText(System.currentTimeMillis())}"); add("Money to receive: ${money(totals[0])}"); add("Money to pay: ${money(totals[1])}"); add("Total received: ${money(totals[2])}"); add("Total paid: ${money(totals[3])}"); add(" "); people.forEach { p -> val pd = debts.filter { it.personId == p.id }; val bal = pd.sumOf { it.amountPaise } - payments.filter { pay -> pd.any { it.id == pay.debtId } }.sumOf { it.amountPaise }; add("${p.name} | ${if (p.side == "RECEIVE") "To receive" else "To pay"} | ${money(bal)}") } }
-                        val file = createPdf(context, "Ente Kadam - Financial Report", lines); val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply { type = "application/pdf"; putExtra(android.content.Intent.EXTRA_STREAM, uri); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }; context.startActivity(android.content.Intent.createChooser(intent, "Export report"))
-                    })
-                    else -> SettingsScreen(language, dark, { language = it; prefs.edit().putString("language", it).apply() }, { dark = it; prefs.edit().putBoolean("dark", it).apply() }, tr, dao = dao, db = db)
-                }
-            }
-        }
-    }
-    if (showAdd) AddDebtDialog(addSide, addFor, tr, onDismiss = { showAdd = false }, onSave = { name, phone, amount, date, note, interest, due ->
-        scope.launch {
-            val person = addFor ?: Person(name = name, phone = phone, side = addSide, notes = "")
-            val personId = if (addFor == null) dao.insertPerson(person) else person.id
-            if (addFor != null && (name.isNotBlank() || phone.isNotBlank())) dao.updatePerson(person.copy(name = name.ifBlank { person.name }, phone = phone))
-            val reminderAt = due?.let { dueMillis -> java.util.Calendar.getInstance().apply { timeInMillis = dueMillis; set(java.util.Calendar.HOUR_OF_DAY, 9); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0) }.timeInMillis }
-            val debtId = dao.insertDebt(Debt(personId = personId, amountPaise = amount, date = date, description = note, interestRate = interest, dueDate = due, reminderAt = reminderAt, reminderEnabled = reminderAt != null))
-            if (reminderAt != null && reminderAt > System.currentTimeMillis()) scheduleReminder(context, debtId, reminderAt, name, money(amount))
-            dao.insertAudit(AuditEntry(entityType = "DEBT", entityId = debtId, action = "CREATED", details = "${money(amount)}"))
-            showAdd = false
-        }
-    })
-    if (payDebt != null) PaymentDialog(payDebt!!, tr, onDismiss = { payDebt = null }, onSave = { amount, date, method, note ->
-        scope.launch {
-            val debt = payDebt!!; val paid = dao.paymentsForDebts(listOf(debt.id)).sumOf { it.amountPaise }; val outstanding = debt.amountPaise - paid
-            if (amount > outstanding) { pendingPayment = Payment(debtId = debt.id, amountPaise = amount, date = date, method = method, notes = note); payOverLimit = true } else {
                 val id = dao.insertPayment(Payment(debtId = debt.id, amountPaise = amount, date = date, method = method, notes = note))
                 dao.insertAudit(AuditEntry(entityType = "PAYMENT", entityId = id, action = "RECORDED", details = "${money(amount)} · $method")); payDebt = null
             }
         }
     })
     if (payOverLimit) AlertDialog(onDismissRequest = { payOverLimit = false; pendingPayment = null }, title = { Text(tr("Amount exceeds balance", "ബാക്കി തുകയേക്കാൾ കൂടുതലാണ്")) }, text = { Text(tr("This payment is greater than the remaining balance. Do you explicitly want to record the full amount anyway?", "ഈ പേയ്മെന്റ് ബാക്കി തുകയേക്കാൾ കൂടുതലാണ്. മുഴുവൻ തുകയും രേഖപ്പെടുത്തണമെന്ന് ഉറപ്പാണോ?")) }, confirmButton = { TextButton(onClick = { scope.launch { pendingPayment?.let { draft -> val id = dao.insertPayment(draft); dao.insertAudit(AuditEntry(entityType = "PAYMENT", entityId = id, action = "RECORDED_OVERPAYMENT_CONFIRMED", details = money(draft.amountPaise))) }; pendingPayment = null; payOverLimit = false; payDebt = null } }) { Text(tr("Record anyway", "എന്നിട്ടും രേഖപ്പെടുത്തുക")) } }, dismissButton = { TextButton(onClick = { pendingPayment = null; payOverLimit = false }) { Text(tr("Go back", "തിരികെ പോകുക")) } })
-    if (showStatement) StatementDialog(statementText, tr, onChange = { statementText = it }, onDismiss = { showStatement = false }, onShare = { shareText(context, statementText); showStatement = false }, onWhatsApp = { shareText(context, statementText, true); showStatement = false })
+    if (showStatement) StatementDialog(statementText, ::tr, onChange = { statementText = it }, onDismiss = { showStatement = false }, onShare = { shareText(context, statementText); showStatement = false }, onWhatsApp = { shareText(context, statementText, true); showStatement = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -254,5 +126,3 @@ class MainActivity : ComponentActivity() {
 @Composable private fun StatementDialog(message: String, tr: (String,String)->String, onChange: (String)->Unit, onDismiss: ()->Unit, onShare: ()->Unit, onWhatsApp: ()->Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text(tr("Preview statement", "കണക്ക് പരിശോധിക്കുക")) }, text = { OutlinedTextField(message, onChange, modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp), minLines = 7) }, confirmButton = { TextButton(onClick = onWhatsApp) { Icon(Icons.Default.Send, null); Text(" WhatsApp") } }, dismissButton = { Row { TextButton(onClick = onShare) { Text(tr("Share", "പങ്കിടുക")) }; TextButton(onClick = onDismiss) { Text(tr("Close", "അടയ്ക്കുക")) } } })
 }
-
-@Composable private fun EmptyState(text: String) { Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.Inbox, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp)); Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant) } } }
